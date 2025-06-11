@@ -18,6 +18,7 @@ import (
 	"github.com/saurabhsingh121/distributed-scheduler/pkg/common"
 	pb "github.com/saurabhsingh121/distributed-scheduler/pkg/grpcapi"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -325,4 +326,41 @@ func (s *CoordinatorServer) getNextWorker() *workerInfo {
 	worker := s.WorkerPool[s.WorkerPoolKeys[s.roundRobinIndex%uint32(workerCount)]]
 	s.roundRobinIndex++
 	return worker
+}
+
+func (s *CoordinatorServer) SendHeartbeat(ctx context.Context, in *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
+	s.WorkerPoolMutex.Lock()
+	defer s.WorkerPoolMutex.Unlock()
+
+	workerID := in.GetWorkerId()
+
+	if worker, ok := s.WorkerPool[workerID]; ok {
+		// log.Println("Reset hearbeat miss for worker:", workerID)
+		worker.heartbeatMisses = 0
+	} else {
+		log.Println("Registering worker:", workerID)
+		conn, err := grpc.NewClient(in.GetAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return nil, err
+		}
+
+		s.WorkerPool[workerID] = &workerInfo{
+			address:             in.GetAddress(),
+			grpcConnection:      conn,
+			workerServiceClient: pb.NewWorkerServiceClient(conn),
+		}
+
+		s.WorkerPoolKeysMutex.Lock()
+		defer s.WorkerPoolKeysMutex.Unlock()
+
+		workerCount := len(s.WorkerPool)
+		s.WorkerPoolKeys = make([]uint32, 0, workerCount)
+		for k := range s.WorkerPool {
+			s.WorkerPoolKeys = append(s.WorkerPoolKeys, k)
+		}
+
+		log.Println("Registered worker:", workerID)
+	}
+
+	return &pb.HeartbeatResponse{Acknowledged: true}, nil
 }
